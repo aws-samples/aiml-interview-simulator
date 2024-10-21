@@ -9,7 +9,7 @@ imageio-ffmpeg==0.4.9
 jmespath==1.0.1
 moviepy==1.0.3
 numpy==1.24.4
-pillow==10.2.0
+pillow==10.3.0
 proglog==0.1.10
 python-dateutil==2.8.2
 requests==2.31.0
