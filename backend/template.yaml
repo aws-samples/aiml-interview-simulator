@@ -1,0 +1,325 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: interview-mentorship-backend
+
+Globals:
+  Function:
+    Timeout: 10
+    MemorySize: 128
+    Tracing: Active
+  Api:
+    TracingEnabled: true
+    Cors:
+      AllowMethods: "'POST,GET,OPTIONS'"
+      AllowHeaders: "'content-type'"
+      AllowOrigin: "'*'"
+
+Parameters:
+  RecordsTableSecondaryIndex:
+    Type: String
+    Default: user_index
+
+Resources:
+  MediaBucket:
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
+      AccelerateConfiguration:
+        AccelerationStatus: Enabled
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+            AllowedOrigins:
+              - "*"
+            Id: CORSRule
+            MaxAge: 3600
+
+  TranscribeResultsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      PolicyDocument:
+        Id: TranscribeResultsPolicy
+        Version: 2012-10-17
+        Statement:
+          - Sid: TranscribeMediaWritePolicy
+            Effect: Allow
+            Principal:
+              Service: "transcribe.amazonaws.com"
+            Action:
+              - s3:PutObject
+            Resource: !Join
+              - ""
+              - - "arn:aws:s3:::"
+                - !Ref MediaBucket
+                - /*
+      Bucket: !Ref MediaBucket
+
+  StateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-analyze"
+      Tracing:
+        Enabled: true
+      DefinitionUri: src/statesmachine/analyze.yaml
+      DefinitionSubstitutions:
+        ConvertVideoFunctionArn: !GetAtt ConvertVideoFunction.Arn
+        CalculateVideoMetricsFunctionArn: !GetAtt CalculateVideoMetricsFunction.Arn
+        CalculateTextMetricsFunctionArn: !GetAtt CalculateTextMetricsFunction.Arn
+        UpdateTableFunctionArn: !GetAtt UpdateTableFunction.Arn
+        TranscribeOutputBucket: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ConvertVideoFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref CalculateVideoMetricsFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref CalculateTextMetricsFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref UpdateTableFunction
+        - S3CrudPolicy:
+            BucketName: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
+        - Version: "2012-10-17"
+          Statement:
+            - Sid: TranscribeJobPolicy
+              Effect: Allow
+              Action:
+                - transcribe:GetTranscriptionJob
+                - transcribe:StartTranscriptionJob
+              Resource: "*"
+
+  StartMachineFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/statesmachine/start_machine/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Architectures:
+        - x86_64
+      Policies:
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt StateMachine.Name
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Ref StateMachine
+      Events:
+        ObjectCreated:
+          Type: S3
+          Properties:
+            Bucket: !Ref MediaBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .webm
+
+  ffmpeglambdalayerpython3:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location:
+        ApplicationId: arn:aws:serverlessrepo:us-east-1:496010403454:applications/ffmpeg-lambda-layer-python3
+        SemanticVersion: 0.0.3
+
+  ConvertVideoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/statesmachine/convert_video/
+      Handler: app.lambda_handler
+      Runtime: python3.8 # layer ffmpeg requirement
+      Timeout: 60
+      MemorySize: 2240
+      Architectures:
+        - x86_64
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RecordsTable
+        - S3CrudPolicy:
+            BucketName: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref RecordsTable
+          INDEX_NAME: !Ref RecordsTableSecondaryIndex
+          BUCKET: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
+      Layers:
+        - !GetAtt ffmpeglambdalayerpython3.Outputs.ffmpegLayerArn
+        
+  CalculateVideoMetricsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/statesmachine/calculate_video_metrics/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Timeout: 300
+      MemorySize: 2240
+      Architectures:
+        - x86_64
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
+        - RekognitionDetectOnlyPolicy: {}
+      Environment:
+        Variables:
+          BUCKET: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
+
+  CalculateTextMetricsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/statesmachine/calculate_text_metrics/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Timeout: 300
+      MemorySize: 2240
+      Architectures:
+        - x86_64
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
+        - Statement:
+            - Sid: BedrockInvokeEndpoint
+              Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: "*"
+      Environment:
+        Variables:
+          BUCKET: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
+
+  UpdateTableFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/statesmachine/update_table/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Architectures:
+        - x86_64
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RecordsTable
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref RecordsTable
+          BUCKET: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
+
+
+  RecordsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-records"
+      AttributeDefinitions:
+        - AttributeName: record_id
+          AttributeType: S
+        - AttributeName: email
+          AttributeType: S
+      KeySchema:
+        - AttributeName: record_id
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      GlobalSecondaryIndexes:
+        - IndexName: !Ref RecordsTableSecondaryIndex
+          KeySchema:
+            - AttributeName: email
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 5
+            WriteCapacityUnits: 5
+
+  AddRecordFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/api/add_record/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Architectures:
+        - x86_64
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RecordsTable
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref RecordsTable
+      Events:
+        ApiRequest:
+          Type: Api
+          Properties:
+            Path: /record
+            Method: post
+
+  ListRecordsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/api/list_records/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Architectures:
+        - x86_64
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RecordsTable
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref RecordsTable
+          INDEX_NAME: !Ref RecordsTableSecondaryIndex
+      Events:
+        ApiRequest:
+          Type: Api
+          Properties:
+            Path: /records
+            Method: get
+
+  PreSignedUploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/api/create_presigned_upload/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Architectures:
+        - x86_64
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref MediaBucket
+      Environment:
+        Variables:
+          BUCKET: !Ref MediaBucket
+      Events:
+        ApiRequest:
+          Type: Api
+          Properties:
+            Path: /upload
+            Method: get
+
+  PreSignedDownloadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/api/create_presigned_download/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Architectures:
+        - x86_64
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref MediaBucket
+      Environment:
+        Variables:
+          BUCKET: !Ref MediaBucket
+      Events:
+        ApiRequest:
+          Type: Api
+          Properties:
+            Path: /download
+            Method: get
+
+Outputs:
+  SimuladorApi:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+

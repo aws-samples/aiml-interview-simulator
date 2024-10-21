@@ -1,0 +1,68 @@
+---
+Comment: Analyze interview'simulation
+StartAt: AnalyzeInterview
+States:
+  AnalyzeInterview:
+    Type: Parallel
+    Next: UpdateTable
+    Branches:
+      # Video
+      - StartAt: ConvertVideo
+        States:
+          ConvertVideo:
+            Type: Task
+            Resource: "${ConvertVideoFunctionArn}"
+            ResultPath: "$.Converted"
+            Next: CalculateVideoMetrics
+          CalculateVideoMetrics:
+            Type: Task
+            Resource: ${CalculateVideoMetricsFunctionArn}
+            ResultPath: "$.VideoMetrics"
+            End: true
+      # Audio
+      - StartAt: Transcription
+        States:
+          Transcription:
+            Type: Task
+            Resource: "arn:aws:states:::aws-sdk:transcribe:startTranscriptionJob"
+            Parameters:
+              TranscriptionJobName.$: States.Format('transcribe-{}', $.Records[0].s3.object.key)
+              OutputBucketName: "${TranscribeOutputBucket}"
+              OutputKey.$: States.Format('transcription/{}.json', $.Records[0].s3.object.key)
+              LanguageCode: "pt-BR"
+              Media:
+                MediaFileUri.$: States.Format('s3://{}/{}', $.Records[0].s3.bucket.name, $.Records[0].s3.object.key)
+            Next: Wait
+          Wait:
+            Type: Wait
+            Seconds: 15
+            Next: GetTranscriptionJob
+          GetTranscriptionJob:
+            Type: Task
+            Parameters:
+              TranscriptionJobName.$: $.TranscriptionJob.TranscriptionJobName
+            Resource: "arn:aws:states:::aws-sdk:transcribe:getTranscriptionJob"
+            Next: TranscriptionJobStatus
+          TranscriptionJobStatus:
+            Type: Choice
+            Choices:
+              - Variable: $.TranscriptionJob.TranscriptionJobStatus
+                StringEquals: COMPLETED
+                Next: CalculateTextMetrics
+              - Variable: $.TranscriptionJob.TranscriptionJobStatus
+                StringEquals: FAILED
+                Next: Failed
+            Default: Wait
+          Failed:
+            Type: Fail
+            Cause: "transcription job failed"
+            Error: FAILED
+          CalculateTextMetrics:
+            Type: Task
+            Resource: ${CalculateTextMetricsFunctionArn}
+            ResultPath: "$.TextMetrics"
+            End: true
+  UpdateTable:
+    Type: Task
+    Resource: ${UpdateTableFunctionArn}
+    End: true
