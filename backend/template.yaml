@@ -1,12 +1,15 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: interview-mentorship-backend
+Description: Interview Simulator - Production Ready Infrastructure
 
 Globals:
   Function:
     Timeout: 10
     MemorySize: 128
+    Runtime: python3.9
     Tracing: Active
+    Architectures:
+      - x86_64
   Api:
     TracingEnabled: true
     Cors:
@@ -18,10 +21,12 @@ Parameters:
   RecordsTableSecondaryIndex:
     Type: String
     Default: user_index
+    Description: DynamoDB Global Secondary Index name
 
 Resources:
+  # S3 Bucket for media files
   MediaBucket:
-    Type: "AWS::S3::Bucket"
+    Type: AWS::S3::Bucket
     DeletionPolicy: Delete
     Properties:
       BucketName: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
@@ -29,17 +34,13 @@ Resources:
         AccelerationStatus: Enabled
       CorsConfiguration:
         CorsRules:
-          - AllowedHeaders:
-              - "*"
-            AllowedMethods:
-              - GET
-              - PUT
-              - POST
-            AllowedOrigins:
-              - "*"
+          - AllowedHeaders: ["*"]
+            AllowedMethods: [GET, PUT, POST]
+            AllowedOrigins: ["*"]
             Id: CORSRule
             MaxAge: 3600
 
+  # S3 Bucket Policy for Transcribe
   TranscribeResultsBucketPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
@@ -50,16 +51,12 @@ Resources:
           - Sid: TranscribeMediaWritePolicy
             Effect: Allow
             Principal:
-              Service: "transcribe.amazonaws.com"
-            Action:
-              - s3:PutObject
-            Resource: !Join
-              - ""
-              - - "arn:aws:s3:::"
-                - !Ref MediaBucket
-                - /*
+              Service: transcribe.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${MediaBucket}/transcription/*"
       Bucket: !Ref MediaBucket
 
+  # Step Functions State Machine
   StateMachine:
     Type: AWS::Serverless::StateMachine
     Properties:
@@ -93,14 +90,12 @@ Resources:
                 - transcribe:StartTranscriptionJob
               Resource: "*"
 
+  # Lambda function to start Step Functions
   StartMachineFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/statesmachine/start_machine/
       Handler: app.lambda_handler
-      Runtime: python3.9
-      Architectures:
-        - x86_64
       Policies:
         - StepFunctionsExecutionPolicy:
             StateMachineName: !GetAtt StateMachine.Name
@@ -119,23 +114,14 @@ Resources:
                   - Name: suffix
                     Value: .webm
 
-  # ffmpeglambdalayerpython3:
-  #   Type: AWS::Serverless::Application
-  #   Properties:
-  #     Location:
-  #       ApplicationId: arn:aws:serverlessrepo:us-east-1:496010403454:applications/ffmpeg-lambda-layer-python3
-  #       SemanticVersion: 0.0.3
-
+  # Video conversion function
   ConvertVideoFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/statesmachine/convert_video/
       Handler: app.lambda_handler
-      Runtime: python3.9 # Updated from python3.8
-      Timeout: 60
+      Timeout: 120
       MemorySize: 2240
-      Architectures:
-        - x86_64
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref RecordsTable
@@ -146,19 +132,15 @@ Resources:
           TABLE_NAME: !Ref RecordsTable
           INDEX_NAME: !Ref RecordsTableSecondaryIndex
           BUCKET: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
-      # Layers:
-      #   - !GetAtt ffmpeglambdalayerpython3.Outputs.ffmpegLayerArn
-        
+
+  # Video metrics calculation function
   CalculateVideoMetricsFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/statesmachine/calculate_video_metrics/
       Handler: app.lambda_handler
-      Runtime: python3.9
       Timeout: 300
       MemorySize: 2240
-      Architectures:
-        - x86_64
       Policies:
         - S3CrudPolicy:
             BucketName: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
@@ -167,16 +149,14 @@ Resources:
         Variables:
           BUCKET: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
 
+  # Text metrics calculation function
   CalculateTextMetricsFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/statesmachine/calculate_text_metrics/
       Handler: app.lambda_handler
-      Runtime: python3.9
       Timeout: 300
       MemorySize: 2240
-      Architectures:
-        - x86_64
       Policies:
         - S3CrudPolicy:
             BucketName: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
@@ -190,14 +170,14 @@ Resources:
         Variables:
           BUCKET: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
 
+  # Database update function
   UpdateTableFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/statesmachine/update_table/
       Handler: app.lambda_handler
-      Runtime: python3.9
-      Architectures:
-        - x86_64
+      Timeout: 30
+      MemorySize: 256
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref RecordsTable
@@ -206,7 +186,7 @@ Resources:
           TABLE_NAME: !Ref RecordsTable
           BUCKET: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
 
-
+  # DynamoDB table for interview records
   RecordsTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -219,9 +199,7 @@ Resources:
       KeySchema:
         - AttributeName: record_id
           KeyType: HASH
-      ProvisionedThroughput:
-        ReadCapacityUnits: 5
-        WriteCapacityUnits: 5
+      BillingMode: PAY_PER_REQUEST
       GlobalSecondaryIndexes:
         - IndexName: !Ref RecordsTableSecondaryIndex
           KeySchema:
@@ -229,18 +207,13 @@ Resources:
               KeyType: HASH
           Projection:
             ProjectionType: ALL
-          ProvisionedThroughput:
-            ReadCapacityUnits: 5
-            WriteCapacityUnits: 5
 
+  # API Functions
   AddRecordFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/api/add_record/
       Handler: app.lambda_handler
-      Runtime: python3.9
-      Architectures:
-        - x86_64
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref RecordsTable
@@ -259,9 +232,6 @@ Resources:
     Properties:
       CodeUri: src/api/list_records/
       Handler: app.lambda_handler
-      Runtime: python3.9
-      Architectures:
-        - x86_64
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref RecordsTable
@@ -281,9 +251,6 @@ Resources:
     Properties:
       CodeUri: src/api/create_presigned_upload/
       Handler: app.lambda_handler
-      Runtime: python3.9
-      Architectures:
-        - x86_64
       Policies:
         - S3CrudPolicy:
             BucketName: !Ref MediaBucket
@@ -302,9 +269,6 @@ Resources:
     Properties:
       CodeUri: src/api/create_presigned_download/
       Handler: app.lambda_handler
-      Runtime: python3.9
-      Architectures:
-        - x86_64
       Policies:
         - S3CrudPolicy:
             BucketName: !Ref MediaBucket
@@ -319,7 +283,26 @@ Resources:
             Method: get
 
 Outputs:
-  SimuladorApi:
+  ApiGatewayEndpoint:
     Description: API Gateway endpoint URL
     Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiEndpoint"
 
+  MediaBucketName:
+    Description: S3 bucket for media files
+    Value: !Ref MediaBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-MediaBucket"
+
+  StateMachineArn:
+    Description: Step Functions State Machine ARN
+    Value: !Ref StateMachine
+    Export:
+      Name: !Sub "${AWS::StackName}-StateMachine"
+
+  RecordsTableName:
+    Description: DynamoDB table for interview records
+    Value: !Ref RecordsTable
+    Export:
+      Name: !Sub "${AWS::StackName}-RecordsTable"
