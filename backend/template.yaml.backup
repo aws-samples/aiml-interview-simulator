@@ -119,19 +119,19 @@ Resources:
                   - Name: suffix
                     Value: .webm
 
-  # ffmpeglambdalayerpython3:
-  #   Type: AWS::Serverless::Application
-  #   Properties:
-  #     Location:
-  #       ApplicationId: arn:aws:serverlessrepo:us-east-1:496010403454:applications/ffmpeg-lambda-layer-python3
-  #       SemanticVersion: 0.0.3
+  ffmpeglambdalayerpython3:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location:
+        ApplicationId: arn:aws:serverlessrepo:us-east-1:496010403454:applications/ffmpeg-lambda-layer-python3
+        SemanticVersion: 0.0.3
 
   ConvertVideoFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/statesmachine/convert_video/
       Handler: app.lambda_handler
-      Runtime: python3.9 # Updated from python3.8
+      Runtime: python3.8 # layer ffmpeg requirement
       Timeout: 60
       MemorySize: 2240
       Architectures:
@@ -146,8 +146,8 @@ Resources:
           TABLE_NAME: !Ref RecordsTable
           INDEX_NAME: !Ref RecordsTableSecondaryIndex
           BUCKET: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
-      # Layers:
-      #   - !GetAtt ffmpeglambdalayerpython3.Outputs.ffmpegLayerArn
+      Layers:
+        - !GetAtt ffmpeglambdalayerpython3.Outputs.ffmpegLayerArn
         
   CalculateVideoMetricsFunction:
     Type: AWS::Serverless::Function
