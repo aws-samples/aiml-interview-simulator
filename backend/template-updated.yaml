@@ -1,0 +1,393 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: interview-mentorship-backend - Updated with fixes and improvements
+
+# CHANGELOG:
+# - Updated Python runtime from 3.8 to 3.9 for all functions
+# - Commented out FFmpeg layer dependencies (temporary fix)
+# - Added robust error handling in UpdateTableFunction
+# - Fixed DynamoDB Decimal type conversion
+# - Added compatibility for both original and temporary video metrics structures
+# - Increased timeout for video processing functions
+# - Added comprehensive documentation
+
+Globals:
+  Function:
+    Timeout: 10
+    MemorySize: 128
+    Tracing: Active
+  Api:
+    TracingEnabled: true
+    Cors:
+      AllowMethods: "'POST,GET,OPTIONS'"
+      AllowHeaders: "'content-type'"
+      AllowOrigin: "'*'"
+
+Parameters:
+  RecordsTableSecondaryIndex:
+    Type: String
+    Default: user_index
+  
+  # New parameter to control FFmpeg layer usage
+  EnableFFmpegLayer:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: "Enable FFmpeg layer for video processing (requires custom layer setup)"
+
+Conditions:
+  UseFFmpegLayer: !Equals [!Ref EnableFFmpegLayer, "true"]
+
+Resources:
+  MediaBucket:
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
+      AccelerateConfiguration:
+        AccelerationStatus: Enabled
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+            AllowedOrigins:
+              - "*"
+            Id: CORSRule
+            MaxAge: 3600
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt StartMachineFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .webm
+
+  TranscribeResultsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      PolicyDocument:
+        Id: TranscribeResultsPolicy
+        Version: 2012-10-17
+        Statement:
+          - Sid: TranscribeMediaWritePolicy
+            Effect: Allow
+            Principal:
+              Service: transcribe.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${MediaBucket}/transcription/*"
+      Bucket: !Ref MediaBucket
+
+  StateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-analyze"
+      Tracing:
+        Enabled: true
+      DefinitionUri: src/statesmachine/analyze.yaml
+      DefinitionSubstitutions:
+        ConvertVideoFunctionArn: !GetAtt ConvertVideoFunction.Arn
+        CalculateVideoMetricsFunctionArn: !GetAtt CalculateVideoMetricsFunction.Arn
+        CalculateTextMetricsFunctionArn: !GetAtt CalculateTextMetricsFunction.Arn
+        UpdateTableFunctionArn: !GetAtt UpdateTableFunction.Arn
+        TranscribeOutputBucket: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ConvertVideoFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref CalculateVideoMetricsFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref CalculateTextMetricsFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref UpdateTableFunction
+        - S3CrudPolicy:
+            BucketName: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
+        - Version: "2012-10-17"
+          Statement:
+            - Sid: TranscribeJobPolicy
+              Effect: Allow
+              Action:
+                - transcribe:GetTranscriptionJob
+                - transcribe:StartTranscriptionJob
+              Resource: "*"
+
+  StartMachineFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/statesmachine/start_machine/
+      Handler: app.lambda_handler
+      Runtime: python3.9  # Updated from python3.8
+      Architectures:
+        - x86_64
+      Policies:
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt StateMachine.Name
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Ref StateMachine
+      Events:
+        ObjectCreated:
+          Type: S3
+          Properties:
+            Bucket: !Ref MediaBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .webm
+
+  # FFmpeg Layer - Commented out due to permission issues
+  # Uncomment and configure when custom FFmpeg layer is available
+  # CustomFFmpegLayer:
+  #   Type: AWS::Lambda::LayerVersion
+  #   Condition: UseFFmpegLayer
+  #   Properties:
+  #     LayerName: !Sub "${AWS::StackName}-ffmpeg-layer"
+  #     Description: "Custom FFmpeg layer for video processing"
+  #     Content:
+  #       S3Bucket: !Sub "${AWS::AccountId}-lambda-layers"
+  #       S3Key: "ffmpeg-layer.zip"
+  #     CompatibleRuntimes:
+  #       - python3.9
+
+  ConvertVideoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/statesmachine/convert_video/
+      Handler: app.lambda_handler
+      Runtime: python3.9  # Updated from python3.8
+      Timeout: 120  # Increased timeout for video processing
+      MemorySize: 2240
+      Architectures:
+        - x86_64
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RecordsTable
+        - S3CrudPolicy:
+            BucketName: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref RecordsTable
+          INDEX_NAME: !Ref RecordsTableSecondaryIndex
+          BUCKET: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
+          FFMPEG_ENABLED: !Ref EnableFFmpegLayer
+      # Layers - Uncomment when FFmpeg layer is available
+      # Layers:
+      #   - !If [UseFFmpegLayer, !Ref CustomFFmpegLayer, !Ref "AWS::NoValue"]
+        
+  CalculateVideoMetricsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/statesmachine/calculate_video_metrics/
+      Handler: app.lambda_handler
+      Runtime: python3.9  # Updated from python3.8
+      Timeout: 300
+      MemorySize: 2240
+      Architectures:
+        - x86_64
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
+        - RekognitionDetectOnlyPolicy: {}
+      Environment:
+        Variables:
+          BUCKET: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
+          FFMPEG_ENABLED: !Ref EnableFFmpegLayer
+      # Layers - Uncomment when FFmpeg layer is available
+      # Layers:
+      #   - !If [UseFFmpegLayer, !Ref CustomFFmpegLayer, !Ref "AWS::NoValue"]
+
+  CalculateTextMetricsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/statesmachine/calculate_text_metrics/
+      Handler: app.lambda_handler
+      Runtime: python3.9  # Updated from python3.8
+      Timeout: 300
+      MemorySize: 2240
+      Architectures:
+        - x86_64
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
+        - Statement:
+            - Sid: BedrockInvokeEndpoint
+              Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: "*"
+      Environment:
+        Variables:
+          BUCKET: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
+
+  UpdateTableFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/statesmachine/update_table/
+      Handler: app.lambda_handler
+      Runtime: python3.9  # Updated from python3.8
+      Timeout: 30  # Increased timeout for DynamoDB operations
+      MemorySize: 256  # Increased memory for better performance
+      Architectures:
+        - x86_64
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RecordsTable
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref RecordsTable
+          BUCKET: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
+
+  RecordsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-records"
+      AttributeDefinitions:
+        - AttributeName: record_id
+          AttributeType: S
+        - AttributeName: email
+          AttributeType: S
+      KeySchema:
+        - AttributeName: record_id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST  # Changed from provisioned to on-demand
+      GlobalSecondaryIndexes:
+        - IndexName: !Ref RecordsTableSecondaryIndex
+          KeySchema:
+            - AttributeName: email
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      # Removed ProvisionedThroughput due to PAY_PER_REQUEST billing mode
+
+  AddRecordFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/api/add_record/
+      Handler: app.lambda_handler
+      Runtime: python3.9  # Updated from python3.8
+      Architectures:
+        - x86_64
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RecordsTable
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref RecordsTable
+      Events:
+        ApiRequest:
+          Type: Api
+          Properties:
+            Path: /record
+            Method: post
+
+  ListRecordsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/api/list_records/
+      Handler: app.lambda_handler
+      Runtime: python3.9  # Updated from python3.8
+      Architectures:
+        - x86_64
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RecordsTable
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref RecordsTable
+          INDEX_NAME: !Ref RecordsTableSecondaryIndex
+      Events:
+        ApiRequest:
+          Type: Api
+          Properties:
+            Path: /records
+            Method: get
+
+  PreSignedUploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/api/create_presigned_upload/
+      Handler: app.lambda_handler
+      Runtime: python3.9  # Updated from python3.8
+      Architectures:
+        - x86_64
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref MediaBucket
+      Environment:
+        Variables:
+          BUCKET: !Ref MediaBucket
+      Events:
+        ApiRequest:
+          Type: Api
+          Properties:
+            Path: /upload
+            Method: get
+
+  PreSignedDownloadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/api/create_presigned_download/
+      Handler: app.lambda_handler
+      Runtime: python3.9  # Updated from python3.8
+      Architectures:
+        - x86_64
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref MediaBucket
+      Environment:
+        Variables:
+          BUCKET: !Ref MediaBucket
+      Events:
+        ApiRequest:
+          Type: Api
+          Properties:
+            Path: /download
+            Method: get
+
+Outputs:
+  ApiGatewayEndpoint:
+    Description: "API Gateway endpoint URL"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiEndpoint"
+
+  MediaBucketName:
+    Description: "S3 bucket for media files"
+    Value: !Ref MediaBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-MediaBucket"
+
+  StateMachineArn:
+    Description: "Step Functions State Machine ARN"
+    Value: !Ref StateMachine
+    Export:
+      Name: !Sub "${AWS::StackName}-StateMachine"
+
+  RecordsTableName:
+    Description: "DynamoDB table for interview records"
+    Value: !Ref RecordsTable
+    Export:
+      Name: !Sub "${AWS::StackName}-RecordsTable"
+
+  # Deployment Status Information
+  DeploymentNotes:
+    Description: "Important deployment information"
+    Value: !Sub |
+      Deployment completed with temporary fixes:
+      1. FFmpeg layer disabled - use EnableFFmpegLayer=true when custom layer is ready
+      2. Video processing uses mock data - replace with actual implementations
+      3. All Lambda functions updated to Python 3.9
+      4. DynamoDB configured for pay-per-request billing
+      5. Enhanced error handling and compatibility implemented
+      
+      Next steps:
+      - Follow FFMPEG_LAYER_GUIDE.md for full video processing
+      - Update Lambda functions with actual video processing logic
+      - Test with real video files
