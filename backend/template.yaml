@@ -53,7 +53,7 @@ Resources:
             Principal:
               Service: transcribe.amazonaws.com
             Action: s3:PutObject
-            Resource: !Sub "${MediaBucket}/transcription/*"
+            Resource: !Sub "${MediaBucket.Arn}/transcription/*"
       Bucket: !Ref MediaBucket
 
   # Step Functions State Machine
