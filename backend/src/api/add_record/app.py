@@ -17,6 +17,18 @@ item = {
 
 
 def lambda_handler(event, context):
+    # Handle OPTIONS request for CORS preflight
+    if event.get('httpMethod') == 'OPTIONS':
+        return {
+            "statusCode": 200,
+            "headers": {
+                "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST,OPTIONS",
+            },
+            "body": ""
+        }
+        
     table = dynamodb.Table(TABLE)
     data = json.loads(event["body"])
 
@@ -30,9 +42,9 @@ def lambda_handler(event, context):
     return {
         "statusCode": 200,
         "headers": {
-            "Access-Control-Allow-Headers": "Content-Type",
+            "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token",
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET",
+            "Access-Control-Allow-Methods": "POST,OPTIONS",
         },
         "body": json.dumps(
             {

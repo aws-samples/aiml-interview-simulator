@@ -14,8 +14,21 @@ Globals:
     TracingEnabled: true
     Cors:
       AllowMethods: "'POST,GET,OPTIONS'"
-      AllowHeaders: "'content-type'"
+      AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
       AllowOrigin: "'*'"
+    GatewayResponses:
+      DEFAULT_4XX:
+        ResponseParameters:
+          Headers:
+            Access-Control-Allow-Origin: "'*'"
+            Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+            Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+      DEFAULT_5XX:
+        ResponseParameters:
+          Headers:
+            Access-Control-Allow-Origin: "'*'"
+            Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+            Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
 
 Parameters:
   RecordsTableSecondaryIndex:
@@ -51,9 +64,14 @@ Resources:
           - Sid: TranscribeMediaWritePolicy
             Effect: Allow
             Principal:
-              Service: transcribe.amazonaws.com
-            Action: s3:PutObject
-            Resource: !Sub "${MediaBucket.Arn}/transcription/*"
+              Service: "transcribe.amazonaws.com"
+            Action:
+              - s3:PutObject
+            Resource: !Join
+              - ""
+              - - "arn:aws:s3:::"
+                - !Ref MediaBucket
+                - /*
       Bucket: !Ref MediaBucket
 
   # Step Functions State Machine
@@ -149,6 +167,14 @@ Resources:
         Variables:
           BUCKET: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
 
+  # Note: Bedrock Inference Profile must be created manually using AWS CLI
+  # Run the following command before deploying:
+  # aws bedrock create-inference-profile \
+  #   --name "interview-backend-claude-sonnet-4-profile" \
+  #   --model-id "anthropic.claude-sonnet-4-20250514-v1:0" \
+  #   --inference-profile-type "ON_DEMAND" \
+  #   --execution-role "arn:aws:iam::<YOUR_ACCOUNT_ID>:role/service-role/AmazonBedrockExecutionRoleForModels_<ROLE_ID>"
+
   # Text metrics calculation function
   CalculateTextMetricsFunction:
     Type: AWS::Serverless::Function
@@ -165,10 +191,15 @@ Resources:
               Effect: Allow
               Action:
                 - bedrock:InvokeModel
+                - bedrock:ListInferenceProfiles
+                - bedrock:CreateInferenceProfile
+                - sts:GetCallerIdentity
               Resource: "*"
       Environment:
         Variables:
           BUCKET: !Sub "${AWS::AccountId}-${AWS::Region}-${AWS::StackName}-media"
+          # Set this to your inference profile ARN after creating it manually
+          # INFERENCE_PROFILE_ARN: "arn:aws:bedrock:<REGION>:<ACCOUNT_ID>:inference-profile/interview-backend-claude-sonnet-4-profile"
 
   # Database update function
   UpdateTableFunction:

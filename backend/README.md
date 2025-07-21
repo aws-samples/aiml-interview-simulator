@@ -24,7 +24,7 @@ Production-ready serverless backend for the Interview Simulator application.
 1. **Deploy the backend**:
    ```bash
    sam build
-   sam deploy --guided
+   sam deploy --stack-name interview-backend --resolve-s3 --resolve-image-repos --capabilities CAPABILITY_AUTO_EXPAND CAPABILITY_IAM
    ```
 
 2. **Get the API endpoint**:
@@ -34,7 +34,7 @@ Production-ready serverless backend for the Interview Simulator application.
      --output text
    ```
 
-3. **Update frontend configuration** with the API endpoint.
+3. **Update frontend configuration** with the API endpoint [frontend/src/services/api.js].
 
 ## API Endpoints
 
@@ -61,22 +61,6 @@ Production-ready serverless backend for the Interview Simulator application.
 - `TABLE_NAME`: DynamoDB table name
 - `STATE_MACHINE_ARN`: Step Functions ARN
 
-### Parameters
-
-- `RecordsTableSecondaryIndex`: DynamoDB GSI name (default: `user_index`)
-
-## Development
-
-### Local Testing
-
-```bash
-# Start local API
-sam local start-api
-
-# Test specific function
-sam local invoke ConvertVideoFunction -e events/s3-event.json
-```
-
 ### Logs
 
 ```bash
@@ -85,21 +69,6 @@ sam logs --stack-name interview-backend --tail
 
 # View specific function logs
 sam logs -n ConvertVideoFunction --tail
-```
-
-## Deployment
-
-### Production Deploy
-
-```bash
-sam build
-sam deploy --parameter-overrides RecordsTableSecondaryIndex=user_index
-```
-
-### Clean Up
-
-```bash
-sam delete --stack-name interview-backend
 ```
 
 ## Monitoring
