@@ -63,8 +63,21 @@ function RecordsTable() {
   // };
   const handleOpenReport = (record) => {
   const parsedReport = JSON.parse(record.report.replace(/'/g, '"'));
-  let objects = record.objects.trim().match(/\[.+\]/)?.[0] || "[]";
-  objects = JSON.parse(objects.replace(/'/g, '"'));
+  
+  // Handle objects safely
+  let objects = [];
+  try {
+    if (record.objects && typeof record.objects === 'string') {
+      const match = record.objects.trim().match(/\[.+\]/)?.[0];
+      if (match) {
+        objects = JSON.parse(match.replace(/'/g, '"'));
+      }
+    } else if (Array.isArray(record.objects)) {
+      objects = record.objects;
+    }
+  } catch (error) {
+    console.error('Error parsing objects:', error);
+  }
 
   setMetrics({
     ...parsedReport,
@@ -85,6 +98,39 @@ function RecordsTable() {
       })
       .then((response) => {
         setRecords(response.data.results);
+      })
+      .catch((error) => {
+        console.error("Error fetching records:", error);
+        // Try to fetch directly with fetch API as a fallback
+        fetch(`${api.defaults.baseURL}records?email=${encodeURIComponent(email)}`, {
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+          }
+        })
+        .then(response => response.text())
+        .then(text => {
+          try {
+            // Try to parse the response as JSON
+            const data = JSON.parse(text);
+            setRecords(data.results || []);
+          } catch (e) {
+            console.error("Error parsing response:", e);
+            // If the response contains Decimal values, try to clean it
+            const cleanedText = text.replace(/\bDecimal\(['"]([\d.]+)['"]\)/g, '$1');
+            try {
+              const data = JSON.parse(cleanedText);
+              setRecords(data.results || []);
+            } catch (e2) {
+              console.error("Failed to parse cleaned response:", e2);
+              setRecords([]);
+            }
+          }
+        })
+        .catch(fetchError => {
+          console.error("Fetch fallback failed:", fetchError);
+          setRecords([]);
+        });
       });
   }, []);
 

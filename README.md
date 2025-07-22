@@ -1,27 +1,80 @@
-# Interview Mentorship
+# AI/ML Interview Simulator
 
-This repository is part of the interview simulation solution prototype.
-
-## Architecture
+A production-ready serverless application for interview simulation and mentorship.
 
 ![Architecture](./assets/wpt-architecture.png)
 
 ## Prerequisites
 
-It is recommended to run this prototype in a sandbox account. The prototype does not have tests, and not all security best practices are implemented.
+- AWS CLI configured
+- AWS SAM CLI installed
+- Node.js v18.16.0, NPM v9.5.1
+- Python v3.8.8
+- Region: us-east-1
+- Access to Claude Sonnet 3.7 model in Amazon Bedrock
 
-To deploy the solution, you will need:
+## Quick Start
 
-- [AWS CLI](https://docs.aws.amazon.com/pt_br/cli/latest/userguide/getting-started-install.html)
-- [AWS SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html)
-- Region _us-east-1_
-- Node.js v18.16.0, NPM v9.5.1, Python v3.8.8
+### 1. Deploy Backend
 
-## Getting Started
+```bash
+cd backend
+sam build
+sam deploy --stack-name interview-backend --resolve-s3 --resolve-image-repos --capabilities CAPABILITY_AUTO_EXPAND CAPABILITY_IAM
+```
 
-1. Deploy the [backend](./backend/README.md)
-2. Change [API endpoint](./frontend/src/services/api.js)
-3. Deploy [frontend](./frontend/README.md)
+Get the API endpoint:
+```bash
+aws cloudformation describe-stacks --stack-name interview-backend \
+  --query 'Stacks[0].Outputs[?OutputKey==`ApiGatewayEndpoint`].OutputValue' \
+  --output text
+```
+
+### 2. Update API Configuration
+
+Update the API endpoint in `frontend/src/services/api.js`
+
+### 3. Deploy Frontend
+
+```bash
+cd frontend
+npm install
+npm run build
+
+# Deploy to AWS
+aws cloudformation create-stack --stack-name interview-frontend --template-body file://template.yaml
+aws cloudformation wait stack-create-complete --stack-name interview-frontend
+bucket_name=$(aws cloudformation describe-stacks --stack-name interview-frontend --query 'Stacks[0].Outputs[?OutputKey==`BucketName`].OutputValue' --output text)
+cloudfront_id=$(aws cloudformation describe-stacks --stack-name interview-frontend --query 'Stacks[0].Outputs[?OutputKey==`CFDistributionID`].OutputValue' --output text)
+cloudfront_name=$(aws cloudformation describe-stacks --stack-name interview-frontend --query 'Stacks[0].Outputs[?OutputKey==`CFDistributionName`].OutputValue' --output text)
+aws s3 sync ./build s3://$bucket_name
+aws cloudfront create-invalidation --distribution-id $cloudfront_id --paths "/*"
+echo $cloudfront_name
+```
+
+## Architecture Components
+
+- **Frontend**: React application
+- **API Gateway**: REST API endpoints
+- **Lambda Functions**: Serverless compute
+- **Step Functions**: Orchestrates video analysis workflow
+- **S3**: Media file storage
+- **DynamoDB**: Interview records storage
+- **Amazon Transcribe**: Speech-to-text conversion
+- **Amazon Bedrock**: AI-powered text analysis
+
+## Cleanup
+
+```bash
+# Delete frontend
+aws s3 rm s3://$bucket_name --recursive
+aws cloudformation delete-stack --stack-name interview-frontend
+aws cloudformation wait stack-delete-complete --stack-name interview-frontend
+
+# Delete backend
+aws cloudformation delete-stack --stack-name interview-backend
+aws cloudformation wait stack-delete-complete --stack-name interview-backend
+```
 
 ## Disclaimer
 
